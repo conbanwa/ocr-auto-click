@@ -18,7 +18,7 @@
   </a>
 </p>
 
-<h1 align="center">Umi-OCR 文字识别工具</h1>
+<h1 align="center">基于Umi-OCR 文字识别的自动点击工具</h1>
 
 <p align="center">
   <a href="https://github.com/hiroi-sora/Umi-OCR/releases/latest">
