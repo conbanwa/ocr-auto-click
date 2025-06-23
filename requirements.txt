@@ -1,1 +1,6 @@
-Levenshtein
+psutil~=7.0.0
+requests~=2.32.3
+Levenshtein~=0.27.1
+PyAutoGUI~=0.9.54
+pillow~=11.2.1
+pyperclip~=1.9.0
