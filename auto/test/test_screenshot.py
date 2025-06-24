@@ -2,9 +2,9 @@ import os
 import tempfile
 from unittest import TestCase
 
-import pyautogui
 from PIL import Image
 
+from auto.ocr.working import get_active_window
 from auto.simulator.xy import take_screenshot
 
 # Editable constants for test configuration
@@ -20,7 +20,7 @@ class TestTakeScreenshotWithCropRegion(TestCase):
     def setUpClass(cls):
         """Create temp directory and get active window before tests"""
         cls.temp_dir = tempfile.mkdtemp(prefix="screenshot_test_")
-        cls.window = pyautogui.getActiveWindow()
+        cls.window = get_active_window()
         if not cls.window:
             raise Exception("No active window found for testing")
 
