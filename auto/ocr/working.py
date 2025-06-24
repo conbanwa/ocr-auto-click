@@ -78,3 +78,4 @@ import pyautogui
 def get_active_window():
     global window
     window = pyautogui.getActiveWindow()
+    return window
