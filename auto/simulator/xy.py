@@ -1,23 +1,23 @@
-import os
 import time
-from typing import Optional, Tuple, List, Dict, Any
+from logging import info, error, debug, warning
+from typing import Optional, Tuple, List
 
 import pyautogui
 
-from auto.ocr import score, working
-from auto.ocr.req import ocr_list, TbpuParser, OcrDict
-from auto.ocr.score import contain
+from auto.ocr import working
+from auto.ocr.req import ocr_list, TbpuParser, OcrDict, TextBox
+from auto.ocr.str import score, position
+from auto.ocr.str.score import contain
 
 # Global variables for debugging and state management
 pyautogui.FAILSAFE = False
 last_screenshot_path: str = "../src/last_screenshot.png"
 last_coordinates: Tuple[float, float] = (0, 0)
-
-from logging import info, error, debug, warning
+CONFIDENCE: float = 0.2
 
 
 def key_value_score(key: str, value: str, similarity: float) -> float:
-    full_line: Optional[Dict[str, Any]] = get_text_details(key, similarity, tbpu_parser=TbpuParser.BY_LINE)
+    full_line: Optional[TextBox] = get_text_detail(key, similarity, tbpu_parser=TbpuParser.BY_LINE)
     debug(f"full_line: {full_line} key: {key}")
     if not full_line or 'text' not in full_line:
         error(f"has no text in full_line: {full_line}")
@@ -25,12 +25,12 @@ def key_value_score(key: str, value: str, similarity: float) -> float:
     return contain(value, full_line['text'])
 
 
-def get_text_details(
+def get_text_detail(
         target_str: str,
-        similarity: float = 0.1,
+        similarity: float = 0.2,
         tbpu_parser: TbpuParser = TbpuParser.NONE,
-        crop_region: Optional[List[Optional[int]]] = None
-) -> Optional[Dict[str, Any]]:
+        crop_region: Optional[List[Optional[int]]] = None,
+) -> Optional[TextBox]:
     """
     Get detailed information about target text in current window
     """
@@ -41,17 +41,56 @@ def get_text_details(
         error(f"Failed to capture screenshot screenshot_path: {screenshot_path}")
         return None
 
+    return _find_text_detail(screenshot_path, target_str, similarity, tbpu_parser, crop_region=crop_region)
+
+
+def get_text_details(
+        target_str: str,
+        similarity: float = 0.2,
+        tbpu_parser: TbpuParser = TbpuParser.NONE,
+        crop_region: Optional[List[Optional[int]]] = None,
+) -> List[TextBox]:
+    """
+    Get detailed information about target text in current window
+    """
+    debug(f"[get_text_details] Getting details for: '{target_str}'")
+
+    screenshot_path: Optional[str] = take_screenshot(crop_region)
+    if not screenshot_path:
+        error(f"Failed to capture screenshot screenshot_path: {screenshot_path}")
+        return []
+
     return _find_text_details(screenshot_path, target_str, similarity, tbpu_parser, crop_region=crop_region)
 
 
-def _find_text_details(
+def _calibrate_center(details: TextBox, target_str: str) -> TextBox:
+    """
+    text_details['center'] only shows the center of the bounding box
+    this function will calibrate the center to the center of the target_str
+    """
+    box = details['box']
+    #  text_details['center'] is the center of the target_str instead of center of the bounding box
+    position_list = position.center_position(target_str, details['text'])
+    if len(position_list) == 0:
+        return details
+    target_position = position_list[0]
+    if len(position_list) > 1:
+        warning(f"Multiple center positions found for '{target_str}': {position_list}")
+    left = box[0][0]
+    right = box[2][0]
+    details['center'][0] = left + target_position * (right - left)
+
+    return details
+
+
+def _find_text_detail(
         file_path: str,
         target_str: str,
-        similarity: float = 0.1,
+        similarity: float = 0.2,
         tbpu_parser: TbpuParser = TbpuParser.NONE,
-        confidence: float = 0.7,
+        confidence: float = 0.5,
         crop_region: Optional[List[Optional[int]]] = None
-) -> Optional[Dict[str, Any]]:
+) -> Optional[TextBox]:
     """
     Find target text in an image file and return basic match information
 
@@ -67,7 +106,9 @@ def _find_text_details(
               Returns None if no match found
     """
 
-    def valuable(_entry: Dict[str, Any]) -> bool:
+    def valuable(_entry: TextBox) -> bool:
+        info(f"{len(score.clean(_entry['text']))} >= {len(target_str)} * 0.8 and {_entry['score']} >= {confidence}")
+        return True
         return len(score.clean(_entry['text'])) >= len(target_str) * 0.8 and _entry['score'] >= confidence
 
     target_str = target_str.strip()
@@ -78,7 +119,7 @@ def _find_text_details(
         debug(f"[ERROR] OCR failed {result}")
         return None
 
-    best_match: Optional[Dict[str, Any]] = None
+    best_match: Optional[TextBox] = None
     best_score: float = 0.006
 
     for entry in result['data']:
@@ -86,26 +127,88 @@ def _find_text_details(
             entry_text: str = entry['text']
             _similarity: float = score.match(target_str, entry_text)
 
-            if _similarity >= best_score and valuable(entry):
-                info(
-                    f"Found match: similarity: {_similarity:.2f} (score: {entry['score']:.2f}) {entry['text']}")
-                if _similarity > similarity:
+            if _similarity >= best_score:
+                info(f"Found match: similarity: {_similarity:.2f} (score: {entry['score']:.2f}) {entry['text']}")
+                best_score = _similarity
+                if _similarity > similarity and valuable(entry):
                     best_match = entry
                     best_match['similarity'] = _similarity
-                    best_score = _similarity
+                else:
+                    info(f"Discarded match: similarity: {_similarity:.2f} valuable: {valuable(entry)}")
 
     if not best_match:
         warning(f"No match found for '{target_str}' with similarity ≥ {similarity}")
+        info(f"text of all matches: {[entry['text'] for entry in result['data']]}")
         return None
 
     warning(f"Found match: {best_match['text']} (similarity: {best_match['similarity']:.2f})")
-    return best_match
+    return _calibrate_center(best_match, target_str)
+
+
+def _find_text_details(
+        file_path: str,
+        target_str: str,
+        similarity: float = 0.2,
+        tbpu_parser: TbpuParser = TbpuParser.NONE,
+        confidence: float = 0.5,
+        crop_region: Optional[List[Optional[int]]] = None,
+) -> List[TextBox]:
+    """
+    Find all occurrences of target text in an image file with similarity > threshold
+
+    Args:
+        file_path (str): Path to image file
+        target_str (str): Text to search for
+        similarity (float): Minimum similarity score (0-1)
+        confidence (float): Minimum confidence (0-1)
+        crop_region (list): Optional crop region [x, y, width, height]
+
+    Returns:
+        List[TextBox]: List of matches with details, each containing:
+            - text: Matched text
+            - score: Confidence score
+            - similarity: Similarity score
+            - box: Bounding box coordinates
+            - center: Center coordinates of the match
+    """
+
+    def valuable(_entry: TextBox) -> bool:
+        return len(score.clean(_entry['text'])) >= len(target_str) * 0.8 and _entry['score'] >= confidence
+
+    target_str = target_str.strip()
+    debug(f"[_find_text_details] Searching for all occurrences of: '{target_str}' in file: {file_path}")
+
+    result: Optional[OcrDict] = ocr_list(file_path, crop_region, tbpu_parser=tbpu_parser)
+    if not result or result['code'] != 100:
+        debug(f"[ERROR] OCR failed {result}")
+        return []
+
+    matches: List[TextBox] = []
+
+    for entry in result['data']:
+        if entry['score'] >= confidence:
+            entry_text: str = entry['text']
+            _similarity: float = score.match(target_str, entry_text)
+
+            if _similarity > similarity and valuable(entry):
+                match = entry.copy()
+                match['similarity'] = _similarity
+                match = _calibrate_center(match, target_str)
+                matches.append(match)
+                debug(f"Found match (similarity: {_similarity:.2f}): {entry_text}")
+
+    if not matches:
+        debug(f"No matches found for '{target_str}' with similarity > {similarity}")
+    else:
+        debug(f"Found {len(matches)} matches for '{target_str}' with similarity > {similarity}")
+
+    return matches
 
 
 def _coordinate(
         file_path: str,
         target_str: str,
-        similarity: float = 0.1,
+        similarity: float = 0.2,
         tbpu_parser: TbpuParser = TbpuParser.NONE,
         confidence: float = 0.7,
         crop_region: Optional[List[Optional[int]]] = None
@@ -125,13 +228,14 @@ def _coordinate(
     """
     global last_coordinates
 
-    result: Optional[Dict[str, Any]] = _find_text_details(file_path, target_str, similarity, tbpu_parser, confidence,
-                                                          crop_region)
-    debug(f"[find_text_details] Result: {result}")
+    result: Optional[TextBox] = (
+        _find_text_detail(file_path, target_str, similarity, tbpu_parser, confidence, crop_region))
+    info(f"[find_text_details] Result: {result}")
     if not result:
         return None
 
     # 直接使用OCR结果中的center坐标
+    # print(result['center'])
     center_x: float
     center_y: float
     center_x, center_y = result['center']
@@ -151,8 +255,8 @@ def take_screenshot(crop_region: Optional[List[Optional[int]]] = None) -> Option
     if not working.window:
         working.get_active_window()
     window = working.window
-    debug(f"[screenshot] Capturing window: {window.title}")
-    debug(f"[screenshot] Position: ({window.left}, {window.top})")
+    # debug(f"[screenshot] Capturing window: {window.title}")
+    # debug(f"[screenshot] Position: ({window.left}, {window.top})")
     debug(f"[screenshot] Dimensions: {window.width}x{window.height}")
 
     # Parse crop region (default to full window if not specified)
@@ -192,15 +296,15 @@ def take_screenshot(crop_region: Optional[List[Optional[int]]] = None) -> Option
     screenshot = pyautogui.screenshot(region=(left, top, width, height))
     screenshot.save(last_screenshot_path)
 
-    debug(f"[screenshot] Saved to: {last_screenshot_path}")
-    debug(f"[screenshot] File size: {os.path.getsize(last_screenshot_path) / 1024:.1f} KB")
+    # debug(f"[screenshot] Saved to: {last_screenshot_path}")
+    # debug(f"[screenshot] File size: {os.path.getsize(last_screenshot_path) / 1024:.1f} KB")
 
     return last_screenshot_path
 
 
 def get_coordinates(
         target_str: str,
-        similarity: float = 0.1,
+        similarity: float = 0.2,
         tbpu_parser: TbpuParser = TbpuParser.NONE,
         crop_region: Optional[List[Optional[int]]] = None
 ) -> Optional[Tuple[float, float]]:
@@ -223,8 +327,8 @@ def get_coordinates(
         error("Failed to capture screenshot")
         return None
 
-    img_coords: Optional[Tuple[float, float]] = _coordinate(screenshot_path, target_str, similarity,
-                                                            tbpu_parser=tbpu_parser, crop_region=crop_region)
+    img_coords: Optional[Tuple[float, float]] = _coordinate(
+        screenshot_path, target_str, similarity, tbpu_parser=tbpu_parser, crop_region=crop_region)
     if not img_coords:
         error(f"Could not locate text: '{target_str}'")
         return None
@@ -245,7 +349,7 @@ def get_coordinates(
 
 def move_mouse_to(
         target_str: str,
-        confidence: float = 0.1,
+        confidence: float = 0.2,
         tbpu_parser: TbpuParser = TbpuParser.NONE,
         crop_region: Optional[List[Optional[int]]] = None
 ) -> bool:
@@ -303,10 +407,9 @@ if __name__ == "__main__":
     # Example usage
     target_text: str = "Successfully"
     crop_area: List[Optional[int]] = [None, None, 800, 600]  # x, y, width, height
-    CONFIDENCE: float = 0.1
 
     # Get text details
-    text_details: Optional[Dict[str, Any]] = get_text_details(target_text, CONFIDENCE, crop_region=crop_area)
+    text_details: Optional[TextBox] = get_text_detail(target_text, CONFIDENCE, crop_region=crop_area)
     print(f"[_coordinate_details] Found {text_details}")
     if text_details:
         print("\nText details found:")
@@ -317,8 +420,8 @@ if __name__ == "__main__":
     # Move and click
     if move_mouse_to(target_text, CONFIDENCE):
         info(f"\nSuccessfully moved to text: '{target_text}'")
-        time.sleep(0.5)
         if click_mouse():
             info("Click successful!")
+            time.sleep(0.2)
     else:
         info(f"\nFailed to find or move to text: '{target_text}'")
