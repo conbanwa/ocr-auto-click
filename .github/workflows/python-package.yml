@@ -41,9 +41,10 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov # Install testing dependencies
 
-      - name: Run tests with unittest
+      - name: Run tests with pytest
         run: |
           python -m unittest discover -s auto/tests -p "test_str*.py"
+          ls
         env:
           PYTHONPATH: "${{ github.workspace }}/auto" # Ensure auto is on the PYTHONPATH for imports
 
