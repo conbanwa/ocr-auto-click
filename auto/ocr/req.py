@@ -2,25 +2,41 @@ import base64
 import json
 import math
 from enum import Enum
-from logging import error
-from typing import Dict, List, Optional, Any
+from logging import error, critical
+from typing import Dict, List, Optional, Any, TypedDict, Literal
 
 import requests
+
+from auto.config_loader import SERVER_ADDRESS
 
 LINE_TOLERANCE = 10
 FONT_HEIGHT_TOLERANCE = 5
 ANGLE_TOLERANCE = 5.0  # 角度容差（度）
 MAX_CHAR_DISTANCE_RATIO = 1  # 文字块间距超过自身长度1.5倍时不合并
 
-# Define OCR result dictionary type
-OcrDict = Dict[str, Any]
-"""OCR result dictionary type containing:
-- 'code': Literal[100] for success
-- 'data': List of text detection dictionaries
-- 'score': Overall confidence score
-- 'time': Processing time
-- 'timestamp': Timestamp
-"""
+
+class TextBox(TypedDict):
+    """Bounding box coordinates in [x1, y1, x2, y2, x3, y3, x4, y4] format"""
+    box: List[tuple[int, int]]
+    original_box: List[tuple[int, int]]
+    score: float
+    similarity: float
+    text: str
+    center: Optional[List[int]]
+    angle: Optional[float]
+
+
+class OcrResult(TypedDict):
+    """Structured OCR result with type hints for all fields"""
+    code: Literal[100]  # 100 indicates success
+    data: List[TextBox]  # List of detected text boxes
+    score: float  # Overall confidence score
+    time: float  # Processing time in seconds
+    timestamp: str  # ISO format timestamp
+
+
+# For backward compatibility
+OcrDict = OcrResult
 
 
 # Define enums for OCR parameters
@@ -91,18 +107,66 @@ def image_to_base64(file_path: str) -> str:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
 
+def _dict_to_ocr_result(data: Dict[str, Any]) -> Optional[OcrResult]:
+    """
+    Convert a dictionary to an OcrResult object
+    
+    Args:
+        data: Dictionary containing OCR result data
+        
+    Returns:
+        OcrResult: Parsed OCR result or None if data is invalid
+    """
+    if not data or 'code' not in data or data.get('code') != 100:
+        error(f"Invalid OCR result data: {data}")
+        return None
+
+    try:
+        # Extract basic fields
+        result: OcrResult = {
+            'code': data['code'],
+            'data': [],
+            'score': data.get('score', 0.0),
+            'time': data.get('time', 0.0),
+            'timestamp': data.get('timestamp', '')
+        }
+
+        # Convert each text box
+        for item in data.get('data', []):
+            if 'box' not in item or 'text' not in item:
+                continue
+
+            text_box: TextBox = {
+                'box': [tuple(point) for point in item['box']],
+                'original_box': [tuple(point) for point in item.get('original_box', item['box'])],
+                'score': float(item.get('score', 0.0)),
+                'similarity': float(item.get('similarity', 0.0)),
+                'text': str(item['text']),
+                'center': list(item['center']) if 'center' in item and item['center'] is not None else None,
+                'angle': float(item['angle']) if 'angle' in item and item['angle'] is not None else None
+            }
+            result['data'].append(text_box)
+
+        return result
+
+    except Exception as e:
+        error(f"Error converting OCR result: {e}")
+        return None
+
+
 def ocr_list(
         file_path: str = '../src/last_screenshot.png',
         crop_region: Optional[List[Optional[int]]] = None,
         ocr_language: OcrLanguage = OcrLanguage.CHINESE,
         ocr_cls: bool = False,
-        ocr_limit_side_len: OcrLimitSideLen = OcrLimitSideLen.MEDIUM,
+        ocr_limit_side_len: OcrLimitSideLen = OcrLimitSideLen.HIGH,
         tbpu_parser: TbpuParser = TbpuParser.NONE,
         tbpu_ignore_area: Optional[List[List[int]]] = None,
         data_format: DataFormat = DataFormat.DICT
 ) -> Optional[OcrDict]:
-    return ocr_list_by_base64(image_to_base64(file_path), crop_region, ocr_language, ocr_cls, ocr_limit_side_len,
-                              tbpu_parser, tbpu_ignore_area, data_format)
+    dict_value = ocr_list_by_base64(image_to_base64(file_path), crop_region, ocr_language, ocr_cls, ocr_limit_side_len,
+                                    tbpu_parser, tbpu_ignore_area, data_format)
+    return _dict_to_ocr_result(dict_value)
 
 
 def ocr_list_by_base64(
@@ -110,11 +174,11 @@ def ocr_list_by_base64(
         crop_region: Optional[List[Optional[int]]] = None,
         ocr_language: OcrLanguage = OcrLanguage.CHINESE,
         ocr_cls: bool = False,
-        ocr_limit_side_len: OcrLimitSideLen = OcrLimitSideLen.MEDIUM,
+        ocr_limit_side_len: OcrLimitSideLen = OcrLimitSideLen.HIGH,
         tbpu_parser: TbpuParser = TbpuParser.NONE,
         tbpu_ignore_area: Optional[List[List[int]]] = None,
         data_format: DataFormat = DataFormat.DICT
-) -> Optional[OcrDict]:
+) -> Optional[Dict[str, Any]]:
     """
     Perform OCR on a base64 encoded image with optional crop region and configurable options
     url = "http://127.0.0.1:1224/api/ocr/get_options"
@@ -132,7 +196,7 @@ def ocr_list_by_base64(
     Returns:
         dict: OCR results with adjusted coordinates if crop region specified
     """
-    url = "http://127.0.0.1:1224/api/ocr"
+    url = f"http://{SERVER_ADDRESS}/api/ocr"
     data = {
         "base64": base64code,
         "options": {
@@ -238,24 +302,27 @@ def _calculate_angle(box: List[List[float]]) -> float:
     return round(angle_deg, 2)
 
 
-def _calculate_center(box: List[List[float]]) -> List[float]:
+def _calculate_center(box: List[List[int]]) -> List[int]:
     """Calculate center point from bounding box"""
     if len(box) != 4:
         return [0, 0]
 
     xs = [p[0] for p in box]
+    center_x: int = int(sum(xs) / 4)
+
     ys = [p[1] for p in box]
-    center_x = sum(xs) / 4
-    center_y = sum(ys) / 4
+    center_y: int = int(sum(ys) / 4)
+    if type(center_x) is not int or type(center_y) is not int:
+        critical(f"center_x: {center_x}, center_y: {center_y}")
     return [center_x, center_y]
 
 
 def _group_text_lines(
-        data: List[Dict[str, Any]],
+        data: List[TextBox],
         tolerance: int = LINE_TOLERANCE,
         per_font: bool = False,
         angle_tolerance: float = ANGLE_TOLERANCE
-) -> List[Dict[str, Any]]:
+) -> List[TextBox]:
     """
     通用文本行分组函数，考虑角度差异和文字块间距
 
@@ -279,12 +346,13 @@ def _group_text_lines(
 
         # 使用原始边界框计算特征（分组前）
         _box = item['original_box']
+        center_x, center_y = _calculate_center(_box)
         xs = [p[0] for p in _box]
         ys = [p[1] for p in _box]
         min_x, min_y = min(xs), min(ys)
         max_x, max_y = max(xs), max(ys)
-        center_x = (min_x + max_x) / 2
-        center_y = (min_y + max_y) / 2
+        # center_x = int((min_x + max_x) / 2)
+        # center_y = int((min_y + max_y) / 2)
         font_height = max_y - min_y
 
         # 计算特征
@@ -343,8 +411,8 @@ def _group_text_lines(
                 group['max_y'] = max(group['max_y'], item['max_y'])
 
                 # 更新中心点
-                group['center_x'] = (group['min_x'] + group['max_x']) / 2
-                group['center_y'] = (group['min_y'] + group['max_y']) / 2
+                group['center_x'] = int((group['min_x'] + group['max_x']) / 2)
+                group['center_y'] = int((group['min_y'] + group['max_y']) / 2)
 
                 # 更新字体高度
                 if per_font:
@@ -421,17 +489,17 @@ def _group_text_lines(
 
 
 def _group_by_line(
-        data: List[Dict[str, Any]],
+        data: List[TextBox],
         tolerance: int = LINE_TOLERANCE
-) -> List[Dict[str, Any]]:
+) -> List[TextBox]:
     """按y坐标分组文本行（不考虑字体）"""
     return _group_text_lines(data, tolerance, per_font=False)
 
 
 def _group_by_font(
-        data: List[Dict[str, Any]],
+        data: List[TextBox],
         tolerance: int = LINE_TOLERANCE
-) -> List[Dict[str, Any]]:
+) -> List[TextBox]:
     """按y坐标和字体大小分组文本行"""
     return _group_text_lines(
         data,
@@ -454,4 +522,4 @@ if __name__ == '__main__':
     # 打印分组后的结果
     for i, line in enumerate(results.get('data', [])):
         print(f"行 {i + 1} (Y={line['center'][1]:.1f}, 角度={line['angle']:.2f}°): {line['text']}")
-        print(f"边界框: {line['box']}  置信度: {line.get('score', 'N/A')}")
+        # print(f"边界框: {line['box']}  置信度: {line.get('score', 'N/A')}")
