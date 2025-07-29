@@ -43,7 +43,7 @@ jobs:
 
       - name: Run tests with pytest
         run: |
-          python -m unittest discover -s auto/tests -p "test_str*.py"
+          python -m unittest discover -s auto/test -p "test_str*.py"
           ls
         env:
           PYTHONPATH: "${{ github.workspace }}/auto" # Ensure auto is on the PYTHONPATH for imports
