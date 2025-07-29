@@ -1,8 +1,18 @@
+import os
+import sys
 import time
 from logging import info, error, debug, warning
 from typing import Optional, Tuple, List
 
+# Add parent directory to path to import config_loader
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from auto.config_loader import MOUSE_DELAY
+
 import pyautogui
+
+# Set PyAutoGUI settings
+pyautogui.PAUSE = MOUSE_DELAY
+pyautogui.FAILSAFE = True
 
 from auto.ocr import working
 from auto.ocr.req import ocr_list, TbpuParser, OcrDict, TextBox
@@ -10,10 +20,18 @@ from auto.ocr.str import score, position
 from auto.ocr.str.score import contain
 
 # Global variables for debugging and state management
-pyautogui.FAILSAFE = False
 last_screenshot_path: str = "../src/last_screenshot.png"
 last_coordinates: Tuple[float, float] = (0, 0)
 CONFIDENCE: float = 0.2
+
+# Log loaded configuration
+info(f"Mouse delay set to: {MOUSE_DELAY}s")
+
+
+def _valuable(_entry: TextBox, target_str: str, confidence: float) -> bool:
+    # info(f"{len(score.clean(_entry['text']))} >= {len(target_str)} * 0.8 and {_entry['score']} >= {confidence}")
+    # return True
+    return len(score.clean(_entry['text'])) >= len(target_str) * 0.8 and _entry['score'] >= confidence
 
 
 def key_value_score(key: str, value: str, similarity: float) -> float:
@@ -106,11 +124,6 @@ def _find_text_detail(
               Returns None if no match found
     """
 
-    def valuable(_entry: TextBox) -> bool:
-        info(f"{len(score.clean(_entry['text']))} >= {len(target_str)} * 0.8 and {_entry['score']} >= {confidence}")
-        return True
-        return len(score.clean(_entry['text'])) >= len(target_str) * 0.8 and _entry['score'] >= confidence
-
     target_str = target_str.strip()
     debug(f"[find_text_details] Searching for: '{target_str}' file_path: {file_path}")
 
@@ -128,13 +141,14 @@ def _find_text_detail(
             _similarity: float = score.match(target_str, entry_text)
 
             if _similarity >= best_score:
-                info(f"Found match: similarity: {_similarity:.2f} (score: {entry['score']:.2f}) {entry['text']}")
+                info(f"Found match: similarity: {_similarity:.2f} (score: {entry['score']:.2f}) {entry}")
                 best_score = _similarity
-                if _similarity > similarity and valuable(entry):
+                if _similarity > similarity and _valuable(entry, target_str, confidence):
                     best_match = entry
                     best_match['similarity'] = _similarity
-                else:
-                    info(f"Discarded match: similarity: {_similarity:.2f} valuable: {valuable(entry)}")
+                # else:
+                # info(
+                #     f"Discarded match: similarity: {_similarity:.2f} valuable: {valuable(entry, target_str, confidence)}")
 
     if not best_match:
         warning(f"No match found for '{target_str}' with similarity ≥ {similarity}")
@@ -172,9 +186,6 @@ def _find_text_details(
             - center: Center coordinates of the match
     """
 
-    def valuable(_entry: TextBox) -> bool:
-        return len(score.clean(_entry['text'])) >= len(target_str) * 0.8 and _entry['score'] >= confidence
-
     target_str = target_str.strip()
     debug(f"[_find_text_details] Searching for all occurrences of: '{target_str}' in file: {file_path}")
 
@@ -190,12 +201,14 @@ def _find_text_details(
             entry_text: str = entry['text']
             _similarity: float = score.match(target_str, entry_text)
 
-            if _similarity > similarity and valuable(entry):
+            if _similarity > similarity and _valuable(entry, target_str, confidence):
                 match = entry.copy()
                 match['similarity'] = _similarity
                 match = _calibrate_center(match, target_str)
                 matches.append(match)
                 debug(f"Found match (similarity: {_similarity:.2f}): {entry_text}")
+            else:
+                debug(f"Discarded match (similarity: {_similarity:.2f}): {entry_text}")
 
     if not matches:
         debug(f"No matches found for '{target_str}' with similarity > {similarity}")
@@ -377,30 +390,26 @@ def move_mouse_to(
     return True
 
 
-def click_mouse(dx: int = 0, dy: int = 0) -> bool:
+def click_mouse(dx: int = 0, dy: int = 0, reference_pos: Optional[Tuple[int, int]] = None) -> None:
     """
-    Click at current mouse position or last known coordinates
+    Click at the specified position with optional offset
 
     Args:
-        dx (int): X offset from last coordinates
-        dy (int): Y offset from last coordinates
-
-    Returns:
-        bool: True if click successful, False otherwise
+        dx (int): X offset from reference position
+        dy (int): Y offset from reference position
+        reference_pos: Optional reference position (x, y). If None, uses current mouse position
     """
-    global last_coordinates
-
-    if last_coordinates:
-        x, y = last_coordinates
-        debug(f"[click_mouse] Clicking at stored coordinates: ({x:.1f}, {y:.1f})")
-        pyautogui.click(x + dx, y + dy)
+    if reference_pos is not None:
+        x, y = reference_pos
+        target_x, target_y = x + dx, y + dy
+        debug(f"[click_mouse] Clicking at position: ({target_x:.1f}, {target_y:.1f}) with offset ({dx}, {dy})")
+        pyautogui.click(target_x, target_y)
     else:
         current_x, current_y = pyautogui.position()
         debug(f"[click_mouse] Clicking at current position: ({current_x}, {current_y})")
         pyautogui.click()
 
-    debug(f"[click_mouse] Click successful")
-    return True
+    debug("[click_mouse] Click successful")
 
 
 if __name__ == "__main__":
